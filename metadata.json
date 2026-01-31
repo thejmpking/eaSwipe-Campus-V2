@@ -1,0 +1,8 @@
+{
+  "name": "EduSync Unified Campus Management",
+  "description": "A comprehensive real-world attendance and campus management system designed for hierarchical educational institutions, featuring NFC simulation, training tracking, and inspection workflows.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
