@@ -91,7 +91,7 @@ export const dataService = {
     }
   },
 
-  deleteRecord: async (table: string, id: string | number) => {
+  deleteRecord: async (table: string, id: string | number): Promise<{ status: 'success' | 'error', error?: string }> => {
     const { url, key } = getSupabaseConfig();
     if (!url || !key) {
         console.warn("Local Simulation: Skipping actual DB delete.");
@@ -102,27 +102,27 @@ export const dataService = {
     const stringId = String(id);
 
     try {
-      console.log(`DELETING: ${table} WHERE id = ${stringId}`);
-      // 1. Attempt Standard PostgREST DELETE
+      console.log(`[DEBUG] Attempting DELETE on ${table} where id = ${stringId}`);
+      
+      // 1. Standard PostgREST DELETE
       const response = await fetch(`${cleanUrl}/rest/v1/${table}?id=eq.${stringId}`, {
         method: 'DELETE',
         headers: {
           ...getHeaders(key),
-          'Prefer': 'return=minimal' // Recommended for Supabase DELETE
+          'Prefer': 'return=minimal'
         }
       });
       
       if (response.ok || response.status === 204) {
-          console.log("Delete Handshake Successful.");
+          console.log("[DEBUG] Delete success (REST)");
           return { status: 'success' };
       }
 
-      // If the response is not ok, read the error body
-      const errorDetail = await response.text();
-      console.warn("REST Verb rejected:", response.status, errorDetail);
+      const errorText = await response.text();
+      console.warn(`[DEBUG] REST DELETE failed (${response.status}):`, errorText);
 
-      // 2. Fallback: Action-based deletion via bridge.php
-      console.warn("Attempting Bridge Fallback...");
+      // 2. Fallback: Bridge.php (If available)
+      console.warn("[DEBUG] Attempting Bridge Fallback...");
       const fallbackRes = await fetch(`${cleanUrl}/bridge.php`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -133,14 +133,14 @@ export const dataService = {
         })
       });
       
-      if (fallbackRes.ok) return { status: 'success' };
+      if (fallbackRes.ok) {
+        return { status: 'success' };
+      }
       
-      const errText = await fallbackRes.text();
-      console.error("Critical Deletion Failure:", errText);
-      return { status: 'error' };
-    } catch (error) {
-      console.error("Network Exception during delete:", error);
-      return { status: 'error' };
+      return { status: 'error', error: `DB rejection: ${errorText}` };
+    } catch (error: any) {
+      console.error("[DEBUG] Network Exception during delete:", error);
+      return { status: 'error', error: error.message };
     }
   },
 

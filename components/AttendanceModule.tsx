@@ -31,7 +31,7 @@ const AttendanceModule: React.FC<AttendanceModuleProps> = ({ userRole, userName,
   const [viewingRecord, setViewingRecord] = useState<{ id: string; day: number; data: any } | null>(null);
   const [markingTarget, setMarkingTarget] = useState<{ id: string; day: number; existingId?: string | number } | null>(null);
   
-  // NEW: Optimistic Deletion Cache to prevent refetch race conditions
+  // Optimistic Deletion Cache to prevent refetch race conditions
   const [blacklistedRecordIds, setBlacklistedRecordIds] = useState<Set<string | number>>(new Set());
   const [availableShifts, setAvailableShifts] = useState<Shift[]>([]);
 
@@ -128,33 +128,38 @@ const AttendanceModule: React.FC<AttendanceModuleProps> = ({ userRole, userName,
     }
   };
 
-  const handleDeleteArtifact = async () => {
+  const handleDeleteArtifact = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
     const rawData = viewingRecord?.data;
     if (!rawData) return;
 
-    // STEP 0 PROOF: Log for Bucket B check
-    console.log("DEBUG_ROW:", rawData);
-
+    // Resolve ID properly (Check for both id and ID)
     const recordId = rawData.id ?? rawData.ID;
     
+    console.log("[DEBUG] Starting Purge for Record ID:", recordId);
+    console.log("[DEBUG] Record context:", rawData);
+
     if (recordId === undefined || recordId === null) {
-      alert("Binding Error: ID Artifact not found in local registry cache. Check console for DEBUG_ROW.");
+      alert("Binding Error: ID Artifact not found in local registry cache.");
       return;
     }
     
-    if (window.confirm("PURGE CONFIRMATION: Remove this record from the Presence Ledger?")) {
+    if (window.confirm("PURGE CONFIRMATION: Permanently remove this record from the Presence Ledger?")) {
       setIsDeleting(true);
       
       // OPTIMISTIC REMOVE: Add to blacklist immediately for instant UI feedback
       setBlacklistedRecordIds(prev => new Set(prev).add(recordId));
-      setActiveAction('None');
-
+      
       try {
-        const result = await dataService.deleteRecord('attendance', String(recordId));
+        const result = await dataService.deleteRecord('attendance', recordId);
         
         if (result.status === 'success') {
-          // Trigger a global refresh to sync parent state
+          console.log("[DEBUG] Deletion confirmed by server.");
+          // Success: Close modal and refresh global state
           onSyncRegistry(); 
+          setActiveAction('None');
           setViewingRecord(null);
         } else {
           // REVERT: If server delete failed, remove from blacklist
@@ -163,17 +168,18 @@ const AttendanceModule: React.FC<AttendanceModuleProps> = ({ userRole, userName,
             next.delete(recordId);
             return next;
           });
-          alert("Purge Failure: The database rejected the request. This is usually an RLS Policy (Bucket C) issue.");
+          console.error("[DEBUG] Deletion rejected:", result.error);
+          alert(`Purge Failure: ${result.error || 'Server rejected request'}. This usually indicates a Supabase RLS Policy violation (Bucket C).`);
         }
-      } catch (err) {
-        console.error("Delete Handshake Failed", err);
+      } catch (err: any) {
+        console.error("[DEBUG] Network exception:", err);
         // REVERT
         setBlacklistedRecordIds(prev => {
           const next = new Set(prev);
           next.delete(recordId);
           return next;
         });
-        alert("Critical Failure: SQL connection interrupted.");
+        alert(`Critical Failure: ${err.message || 'SQL connection interrupted'}.`);
       } finally {
         setIsDeleting(false);
       }
@@ -504,6 +510,7 @@ const AttendanceModule: React.FC<AttendanceModuleProps> = ({ userRole, userName,
 
                     {hasManagementAuthority && (
                        <button 
+                        type="button"
                         onClick={handleDeleteArtifact}
                         disabled={isDeleting}
                         className="w-20 h-20 bg-[#FFF1F2] text-[#EF4444] rounded-[2rem] font-black text-2xl uppercase border border-[#FFE4E6] hover:bg-[#FECDD3] transition-all active:scale-95 flex items-center justify-center shrink-0 shadow-xl shadow-rose-500/5"
