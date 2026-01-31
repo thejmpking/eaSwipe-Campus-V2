@@ -88,7 +88,7 @@ const AttendanceModule: React.FC<AttendanceModuleProps> = ({ userRole, userName,
   const attendanceMap = useMemo(() => {
     const map: Record<string, any> = {};
     attendanceRecords.forEach(record => {
-      // PROOF CHECK: Skip records that are optimistically deleted
+      // Logic: Skip records that are optimistically deleted
       const recordId = record.id ?? record.ID;
       if (blacklistedRecordIds.has(recordId)) return;
 
@@ -132,54 +132,56 @@ const AttendanceModule: React.FC<AttendanceModuleProps> = ({ userRole, userName,
     e.preventDefault();
     e.stopPropagation();
 
+    // Guard: Prevent double-click firing during active request
+    if (isDeleting) return;
+
     const rawData = viewingRecord?.data;
     if (!rawData) return;
 
-    // Resolve ID properly (Check for both id and ID)
     const recordId = rawData.id ?? rawData.ID;
     
-    console.log("[DEBUG] Starting Purge for Record ID:", recordId);
-    console.log("[DEBUG] Record context:", rawData);
-
     if (recordId === undefined || recordId === null) {
-      alert("Binding Error: ID Artifact not found in local registry cache.");
+      alert("Error: Record ID not resolved.");
       return;
     }
     
-    if (window.confirm("PURGE CONFIRMATION: Permanently remove this record from the Presence Ledger?")) {
+    if (window.confirm("PURGE CONFIRMATION: Permanently remove this artifact?")) {
       setIsDeleting(true);
       
-      // OPTIMISTIC REMOVE: Add to blacklist immediately for instant UI feedback
-      setBlacklistedRecordIds(prev => new Set(prev).add(recordId));
-      
+      // 1. OPTIMISTIC UI: Instantly hide from ledger
+      setBlacklistedRecordIds(prev => {
+         const next = new Set(prev);
+         next.add(recordId);
+         return next;
+      });
+
+      // 2. State Cleanup
+      setActiveAction('None');
+
       try {
         const result = await dataService.deleteRecord('attendance', recordId);
         
         if (result.status === 'success') {
-          console.log("[DEBUG] Deletion confirmed by server.");
-          // Success: Close modal and refresh global state
+          // Success: Close modal and trigger sync (to update others)
           onSyncRegistry(); 
-          setActiveAction('None');
           setViewingRecord(null);
         } else {
-          // REVERT: If server delete failed, remove from blacklist
+          // Failure: Revert UI state
           setBlacklistedRecordIds(prev => {
             const next = new Set(prev);
             next.delete(recordId);
             return next;
           });
-          console.error("[DEBUG] Deletion rejected:", result.error);
-          alert(`Purge Failure: ${result.error || 'Server rejected request'}. This usually indicates a Supabase RLS Policy violation (Bucket C).`);
+          alert(`Delete Failed: ${result.error || 'Check Supabase RLS policies.'}`);
+          setActiveAction('ViewDetail'); // Re-open detail if failed
         }
       } catch (err: any) {
-        console.error("[DEBUG] Network exception:", err);
-        // REVERT
         setBlacklistedRecordIds(prev => {
           const next = new Set(prev);
           next.delete(recordId);
           return next;
         });
-        alert(`Critical Failure: ${err.message || 'SQL connection interrupted'}.`);
+        alert(`Critical Network Failure: ${err.message}`);
       } finally {
         setIsDeleting(false);
       }

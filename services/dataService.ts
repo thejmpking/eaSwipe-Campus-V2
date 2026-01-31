@@ -93,19 +93,14 @@ export const dataService = {
 
   deleteRecord: async (table: string, id: string | number): Promise<{ status: 'success' | 'error', error?: string }> => {
     const { url, key } = getSupabaseConfig();
-    if (!url || !key) {
-        console.warn("Local Simulation: Skipping actual DB delete.");
-        return { status: 'success' }; 
-    }
+    if (!url || !key) return { status: 'success' };
 
     const cleanUrl = url.endsWith('/') ? url.slice(0, -1) : url;
-    const stringId = String(id);
+    // Standard attendance IDs in this schema are BIGINT (Numbers)
+    const queryParam = typeof id === 'number' ? `id=eq.${id}` : `id=eq."${id}"`;
 
     try {
-      console.log(`[DEBUG] Attempting DELETE on ${table} where id = ${stringId}`);
-      
-      // 1. Standard PostgREST DELETE
-      const response = await fetch(`${cleanUrl}/rest/v1/${table}?id=eq.${stringId}`, {
+      const response = await fetch(`${cleanUrl}/rest/v1/${table}?${queryParam}`, {
         method: 'DELETE',
         headers: {
           ...getHeaders(key),
@@ -114,32 +109,12 @@ export const dataService = {
       });
       
       if (response.ok || response.status === 204) {
-          console.log("[DEBUG] Delete success (REST)");
           return { status: 'success' };
       }
 
-      const errorText = await response.text();
-      console.warn(`[DEBUG] REST DELETE failed (${response.status}):`, errorText);
-
-      // 2. Fallback: Bridge.php (If available)
-      console.warn("[DEBUG] Attempting Bridge Fallback...");
-      const fallbackRes = await fetch(`${cleanUrl}/bridge.php`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          action: 'DELETE_RECORD', 
-          table, 
-          id: stringId 
-        })
-      });
-      
-      if (fallbackRes.ok) {
-        return { status: 'success' };
-      }
-      
-      return { status: 'error', error: `DB rejection: ${errorText}` };
+      const errorBody = await response.json().catch(() => ({ message: 'Network rejection' }));
+      return { status: 'error', error: errorBody.message || `HTTP ${response.status}` };
     } catch (error: any) {
-      console.error("[DEBUG] Network Exception during delete:", error);
       return { status: 'error', error: error.message };
     }
   },
