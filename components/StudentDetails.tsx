@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo } from 'react';
 import { UserIdentity } from '../App';
 
@@ -43,12 +42,24 @@ const StudentDetails: React.FC<StudentDetailsProps> = ({ studentId, users, atten
         return (
           <div className="space-y-6 animate-in fade-in duration-500 pb-20">
             <div className="bg-white p-8 rounded-[3rem] border border-slate-100 shadow-sm space-y-8">
-              <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Identity Artifacts</h4>
+              <div className="flex justify-between items-center px-1">
+                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Identity Artifacts</h4>
+                 {systemUser?.whatsapp && (
+                    <a 
+                      href={`https://wa.me/91${systemUser.whatsapp.replace(/\D/g, '')}`} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-[9px] font-black uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-600 hover:text-white transition-all shadow-sm"
+                    >
+                      <span>💬</span> Send Message
+                    </a>
+                 )}
+              </div>
               <div className="grid grid-cols-1 gap-8">
                 <ProfileField label="Full Legal Name" value={systemUser?.name || 'Unlinked'} icon="👤" />
                 <div className="grid grid-cols-2 gap-4">
                   <ProfileField label="Blood Group" value={systemUser?.bloodGroup || 'O+'} icon="🩸" />
-                  <ProfileField label="Registry Tier" value={systemUser?.role || 'Student'} icon="🎓" />
+                  <ProfileField label="Institutional Role" value={systemUser?.role?.replace('_', ' ') || 'Student'} icon="🎓" />
                 </div>
                 <ProfileField label="Node Assignment" value={systemUser?.assignment || 'Global Root'} icon="📍" />
                 <ProfileField label="Residential Node" value={systemUser?.address || 'Registered Residential Address'} icon="🏠" />

@@ -2,54 +2,64 @@
 import { UserRole } from '../types';
 
 /**
- * Institutional Data Service (Supabase & Bridge Edition)
- * Enhanced with action-based routing for restricted environments.
+ * Institutional Data Service (Supabase SQL Edition)
+ * Pure PostgREST implementation for Sovereign Ledger Access.
  */
 
-const getSupabaseConfig = () => {
-  const url = (localStorage.getItem('SUPABASE_URL') || '').trim().replace(/^["']|["']$/g, '');
-  const key = (localStorage.getItem('SUPABASE_KEY') || '').trim().replace(/^["']|["']$/g, '');
+const getConfig = () => {
+  const rawUrl = (localStorage.getItem('SUPABASE_URL') || '').trim();
+  // Remove wrapping quotes and trailing slashes
+  const url = rawUrl.replace(/^["']|["']$/g, '').replace(/\/+$/, "");
+  
+  const rawKey = (localStorage.getItem('SUPABASE_KEY') || '').trim();
+  // Ensure the key is clean: remove quotes, remove "Bearer " if present, and trim whitespace
+  const key = rawKey
+    .replace(/^["']|["']$/g, '')      
+    .replace(/^Bearer\s+/i, '')
+    .trim();      
+    
   return { url, key };
 };
 
-const getHeaders = (key: string) => ({
-  'Content-Type': 'application/json',
-  'apikey': key,
-  'Authorization': `Bearer ${key}`
-});
+const getHeaders = (key: string, extraHeaders: Record<string, string> = {}) => {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...extraHeaders
+  };
+  if (key) {
+    // Supabase PostgREST requires both 'apikey' and 'Authorization'
+    headers['apikey'] = key;
+    headers['Authorization'] = `Bearer ${key}`;
+  }
+  return headers;
+};
 
-// Helper: Convert camelCase to snake_case for DB writes
 const toSnake = (obj: any): any => {
   if (obj === null || typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(toSnake);
-  
   return Object.keys(obj).reduce((acc: any, key) => {
-    const snakeKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-    const value = obj[key];
+    const hasUpperCase = /[A-Z]/.test(key);
+    const snakeKey = hasUpperCase 
+      ? key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)
+      : key;
     
-    if (value === null) {
-      acc[snakeKey] = null;
-    } else if (Array.isArray(value)) {
-      acc[snakeKey] = value.map(toSnake);
-    } else if (typeof value === 'object') {
-      acc[snakeKey] = toSnake(value);
+    // Safety check: Don't overwrite if the snake_case version already exists and the camelCase version is just a duplicate
+    if (acc[snakeKey] !== undefined && hasUpperCase) {
+       // if we have both 'isRead' and 'is_read', and we're processing 'isRead', 
+       // only update if the new value is truthy (or different)
+       acc[snakeKey] = obj[key];
     } else {
-      acc[snakeKey] = value;
+       acc[snakeKey] = typeof obj[key] === 'object' ? toSnake(obj[key]) : obj[key];
     }
-    
     return acc;
   }, {});
 };
 
-// Helper: Convert snake_case to camelCase for DB reads
 const toCamel = (obj: any): any => {
   if (obj === null || typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(toCamel);
-  
   return Object.keys(obj).reduce((acc: any, key) => {
-    const camelKey = key.replace(/([-_][a-z])/g, group =>
-      group.toUpperCase().replace('-', '').replace('_', '')
-    );
+    const camelKey = key.replace(/([-_][a-z])/g, group => group.toUpperCase().replace('-', '').replace('_', ''));
     acc[camelKey] = typeof obj[key] === 'object' ? toCamel(obj[key]) : obj[key];
     return acc;
   }, {});
@@ -57,75 +67,81 @@ const toCamel = (obj: any): any => {
 
 export const dataService = {
   syncRecord: async (table: string, data: any) => {
-    const { url, key } = getSupabaseConfig();
-    if (!url || !key) return { status: 'success' }; 
+    const { url, key } = getConfig();
+    if (!url) return { status: 'error', message: 'Network Identity Node (URL) is missing.' };
 
     try {
       const dbReadyData = toSnake(data);
-      const hasId = Array.isArray(dbReadyData) 
-        ? dbReadyData.every(item => item.id !== undefined) 
-        : dbReadyData.id !== undefined;
-
-      const endpoint = hasId 
-        ? `${url}/rest/v1/${table}?on_conflict=id` 
-        : `${url}/rest/v1/${table}`;
-
+      const endpoint = `${url}/rest/v1/${table}`;
+      
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          ...getHeaders(key),
-          'Prefer': hasId ? 'resolution=merge-duplicates' : 'return=minimal'
-        },
+        headers: getHeaders(key, { 
+          'Prefer': 'resolution=merge-duplicates,return=representation' 
+        }),
         body: JSON.stringify(dbReadyData)
       });
       
       if (!response.ok) {
-        const errText = await response.text();
-        console.error(`DB Write Error [${table}]:`, errText);
-        throw new Error(`Supabase Sync Failed: ${errText}`);
+        const rawErr = await response.text();
+        let errorMessage = rawErr;
+        try {
+          const jsonErr = JSON.parse(rawErr);
+          if (jsonErr.code === '42P01') errorMessage = `The table "${table}" does not exist in the SQL schema. Please run the SQL blueprint first.`;
+          else errorMessage = jsonErr.message || jsonErr.error_description || jsonErr.code || rawErr;
+        } catch (e) {}
+        return { status: 'error', message: errorMessage };
       }
-      return { status: 'success' };
-    } catch (error) {
-      console.error(`Supabase Sync Error [${table}]:`, error);
-      return { status: 'error' };
+
+      const text = await response.text();
+      const result = text ? JSON.parse(text) : {};
+      return { status: 'success', data: toCamel(result) };
+    } catch (error: any) {
+      console.error("Network Error during Sync", error);
+      return { status: 'error', message: error.message || 'Node connection refused.' };
     }
   },
 
-  deleteRecord: async (table: string, id: string | number): Promise<{ status: 'success' | 'error', error?: string }> => {
-    const { url, key } = getSupabaseConfig();
-    if (!url || !key) return { status: 'success' };
-
-    const cleanUrl = url.endsWith('/') ? url.slice(0, -1) : url;
-    // Standard attendance IDs in this schema are BIGINT (Numbers)
-    const queryParam = typeof id === 'number' ? `id=eq.${id}` : `id=eq."${id}"`;
+  deleteRecord: async (table: string, id: string | number): Promise<{ status: 'success' | 'error', message?: string }> => {
+    const { url, key } = getConfig();
+    if (!url) return { status: 'error', message: 'Registry Node URL missing.' };
+    
+    const safeId = String(id).trim();
+    const endpoint = `${url}/rest/v1/${table}?id=eq.${encodeURIComponent(safeId)}`;
 
     try {
-      const response = await fetch(`${cleanUrl}/rest/v1/${table}?${queryParam}`, {
+      const response = await fetch(endpoint, {
         method: 'DELETE',
-        headers: {
-          ...getHeaders(key),
-          'Prefer': 'return=minimal'
-        }
+        headers: getHeaders(key, {
+          'Prefer': 'return=representation'
+        })
       });
       
-      if (response.ok || response.status === 204) {
-          return { status: 'success' };
+      if (!response.ok) {
+        const rawErr = await response.text();
+        let msg = rawErr;
+        try { 
+          const json = JSON.parse(rawErr);
+          msg = json.message || json.error_description || rawErr;
+        } catch(e) {}
+        return { status: 'error', message: msg || 'Decommissioning handshake refused.' };
       }
 
-      const errorBody = await response.json().catch(() => ({ message: 'Network rejection' }));
-      return { status: 'error', error: errorBody.message || `HTTP ${response.status}` };
+      return { status: 'success' };
     } catch (error: any) {
-      return { status: 'error', error: error.message };
+      return { status: 'error', message: error.message || 'Registry Node connection timed out.' };
     }
   },
 
   getRecords: async (table: string) => {
-    const { url, key } = getSupabaseConfig();
+    const { url, key } = getConfig();
     if (!url || !key) return [];
     try {
-      const response = await fetch(`${url}/rest/v1/${table}?select=*`, {
-        headers: getHeaders(key)
+      const endpoint = `${url}/rest/v1/${table}?select=*`;
+      const response = await fetch(endpoint, { 
+        headers: getHeaders(key) 
       });
+      if (!response.ok) return [];
       const data = await response.json();
       return toCamel(data);
     } catch (error) { 
@@ -139,25 +155,31 @@ export const dataService = {
   getSchools: async () => dataService.getRecords('schools'),
 
   verifyLogin: async (id: string, pin: string) => {
-    const { url, key } = getSupabaseConfig();
+    const { url, key } = getConfig();
     if (!url || !key) return null;
     try {
-      const response = await fetch(`${url}/rest/v1/users?id=eq.${id}&password=eq.${pin}&select=*`, {
-        headers: getHeaders(key)
-      });
+      const query = new URLSearchParams({
+        id: `eq.${id}`,
+        password: `eq.${pin}`,
+        select: '*'
+      }).toString();
+
+      const endpoint = `${url}/rest/v1/users?${query}`;
+      const response = await fetch(endpoint, { headers: getHeaders(key) });
+      
       const users = await response.json();
       if (users && users.length > 0) {
         const user = toCamel(users[0]);
+        // Update heartbeat
         fetch(`${url}/rest/v1/users?id=eq.${id}`, {
-          method: 'PATCH',
-          headers: { ...getHeaders(key), 'Content-Type': 'application/json' },
+          method: 'PATCH', 
+          headers: getHeaders(key, { 'Prefer': 'return=minimal' }),
           body: JSON.stringify({ last_active: new Date().toISOString() })
         });
         return user;
       }
       return null;
     } catch (error) {
-      console.error("Auth Failed", error);
       return null;
     }
   }

@@ -36,7 +36,7 @@ export interface AttendanceRecord {
   userId: string;
   userName: string;
   userRole: UserRole;
-  status: 'Present' | 'Absent' | 'Late';
+  status: 'Present' | 'Absent' | 'Late' | 'Early';
   timestamp: string;
   schoolId: string;
   method: 'NFC' | 'Manual' | 'Facial';
@@ -47,7 +47,8 @@ export interface Shift {
   label: string;
   startTime: string;
   endTime: string;
-  gracePeriod: number; // in minutes
+  gracePeriod: number; // in minutes (Late threshold)
+  earlyMarkMinutes?: number; // in minutes (Early threshold)
   type: 'Standard' | 'Exam' | 'Special';
   status: 'Active' | 'Draft';
 }
@@ -58,7 +59,31 @@ export interface ShiftAssignment {
   targetId: string; // Class ID or User ID
   targetName: string;
   targetType: 'Class' | 'Individual';
-  assignedDate: string;
+  assignedDate?: string; // Kept for legacy/specific day fallback
+  startDate: string;
+  endDate: string;
+}
+
+export interface TimeTableSlot {
+  id: string;
+  subject: string;
+  day: 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday' | 'Sunday';
+  startTime: string;
+  endTime: string;
+  facultyName?: string;
+  facultyId?: string;
+  room?: string;
+}
+
+export interface TimeTable {
+  id: string;
+  label: string;
+  shiftId: string;
+  targetId: string; // Class Name or User ID
+  targetType: 'Class' | 'Individual';
+  school: string;
+  content: TimeTableSlot[];
+  status: 'Active' | 'Draft';
 }
 
 export interface TrainingShift {

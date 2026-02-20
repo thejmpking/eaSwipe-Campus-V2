@@ -1,356 +1,569 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { UserRole } from '../types';
 import { UserIdentity } from '../App';
+import { dataService } from '../services/dataService';
 
 interface UserProfileProps {
   user: UserIdentity;
-  loggedInRole: UserRole;
   onBack: () => void;
-  onDeleteIdentity?: (id: string) => void;
   onUpdateUser?: (updated: UserIdentity) => void;
-  onNavigateToRoles?: () => void;
-  onViewOperationalDetails?: (userId: string, role: UserRole) => void;
+  onDeleteUser?: (id: string) => void;
+  onOversight?: (id: string, role: UserRole) => void;
+  currentUserRole: UserRole;
+  currentUserId: string;
 }
 
-const UserProfile: React.FC<UserProfileProps> = ({ user, loggedInRole, onBack, onDeleteIdentity, onUpdateUser, onNavigateToRoles, onViewOperationalDetails }) => {
+const UserProfile: React.FC<UserProfileProps> = ({ user, onBack, onUpdateUser, onDeleteUser, onOversight, currentUserRole, currentUserId }) => {
   const [isEditing, setIsEditing] = useState(false);
-  const [editForm, setEditForm] = useState<UserIdentity>({ ...user });
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isCommitting, setIsCommitting] = useState(false);
+  const [form, setForm] = useState<UserIdentity>({ ...user });
+  
+  // Migration Request States
+  const [isRequestingMigration, setIsRequestingMigration] = useState(false);
+  const [migrationForm, setMigrationForm] = useState({ targetCluster: '', reason: '' });
+  const [availableClusters, setAvailableClusters] = useState<any[]>([]);
 
   useEffect(() => {
-    setEditForm({ ...user });
-  }, [user]);
-
-  const schoolOptions = ["North Valley High", "East Side Primary", "Central Secondary", "Valley Middle School", "River Primary", "Waterfront Tech", "Command Center", "Campus Hub", "AL Hidaya Iringallur", "Rayhan Valley Kadampuzha"];
-  const clusterOptions = ["Central Business Cluster", "Riverside Academic Cluster", "Northern Heights Cluster", "Southern Metro Cluster", "Global Root", "Vengara Cluster", "Tirur Cluster"];
-  
-  const isAdmin = loggedInRole === UserRole.ADMIN || loggedInRole === UserRole.SUPER_ADMIN;
-  const isManagement = [UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.CAMPUS_HEAD, UserRole.SCHOOL_ADMIN, UserRole.RESOURCE_PERSON].includes(loggedInRole);
-  const canEdit = isAdmin || user.id === editForm.id;
-
-  const handleSave = () => {
-    if (onUpdateUser) {
-      onUpdateUser(editForm);
+    if (isRequestingMigration) {
+      dataService.getClusters().then(setAvailableClusters);
     }
-    alert("Institutional Record Updated and Synchronized.");
-    setIsEditing(false);
-  };
+  }, [isRequestingMigration]);
 
-  const handleCancel = () => {
-    setEditForm({ ...user });
-    setIsEditing(false);
-  };
+  // JURISDICTIONAL HELPER: Enforce edit protection at profile level
+  const canEditTarget = useMemo(() => {
+    // Super Admin absolute power
+    if (currentUserRole === UserRole.SUPER_ADMIN) return true;
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64String = reader.result as string;
-        setEditForm({ ...editForm, nfcUrl: base64String }); // We'll store avatar string in a dedicated field if needed, for now repurposing pointer or state
-        alert("Image artifact processed for upload. Click Save to commit.");
-      };
-      reader.readAsDataURL(file);
+    // Self Edit Bypass
+    if (user.id === currentUserId) return true;
+
+    // School Admin specific authority locks
+    if (currentUserRole === UserRole.SCHOOL_ADMIN) {
+      const protectedFromSchoolAdmin = [
+        UserRole.SUPER_ADMIN,
+        UserRole.ADMIN,
+        UserRole.CAMPUS_HEAD,
+        UserRole.RESOURCE_PERSON,
+        UserRole.SCHOOL_ADMIN
+      ];
+      if (protectedFromSchoolAdmin.includes(user.role)) return false;
+      return true;
     }
-  };
 
-  const triggerUpload = () => {
-    fileInputRef.current?.click();
-  };
+    const restrictedViewers = [UserRole.RESOURCE_PERSON, UserRole.TEACHER, UserRole.STUDENT];
+    const protectedTargets = [
+      UserRole.SUPER_ADMIN, 
+      UserRole.ADMIN, 
+      UserRole.CAMPUS_HEAD, 
+      UserRole.SCHOOL_ADMIN, 
+      UserRole.RESOURCE_PERSON
+    ];
 
-  const handleDeleteIdentity = () => {
-    if (window.confirm(`PURGE CONFIRMATION: You are about to permanently delete the identity record for ${user.name}.`)) {
-      if (onDeleteIdentity) {
-        onDeleteIdentity(user.id);
+    if (restrictedViewers.includes(currentUserRole)) {
+      if (protectedTargets.includes(user.role)) {
+        return false;
       }
-      onBack();
+    }
+    return true;
+  }, [currentUserRole, user.role, user.id, currentUserId]);
+
+  // OVERSIGHT HELPER: Determine if current user can perform oversight on target
+  const canViewOversight = useMemo(() => {
+    if (!onOversight || isEditing || user.id === currentUserId) return false;
+    
+    // RP Oversight Rule: Only School Admin and above can oversee Resource Persons
+    if (user.role === UserRole.RESOURCE_PERSON) {
+      const authorizedOverseers = [UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.CAMPUS_HEAD, UserRole.SCHOOL_ADMIN];
+      return authorizedOverseers.includes(currentUserRole);
+    }
+    
+    return true;
+  }, [onOversight, isEditing, user.id, user.role, currentUserId, currentUserRole]);
+
+  // AUTHORITY HELPER: Only Super Admin and Admin can decommission users
+  const canDelete = (currentUserRole === UserRole.SUPER_ADMIN || currentUserRole === UserRole.ADMIN) && user.id !== currentUserId;
+
+  // SECURITY HELPER: Check if user is authorized to manage PINs
+  const canManagePin = useMemo(() => {
+    const authorizedRoles = [UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.RESOURCE_PERSON, UserRole.SCHOOL_ADMIN];
+    return authorizedRoles.includes(currentUserRole);
+  }, [currentUserRole]);
+
+  const handleSave = async () => {
+    setIsCommitting(true);
+    try {
+      // PERSISTENT SYNC: Write the modified artifact to the SQL ledger
+      const res = await dataService.syncRecord('users', form);
+      
+      if (res.status === 'success') {
+        onUpdateUser?.(form);
+        setIsEditing(false);
+      } else {
+        // SQL SCHEMA ERROR DETECTION
+        if (res.message?.includes('PGRST204') || res.message?.toLowerCase().includes('whatsapp')) {
+          const sqlFix = "ALTER TABLE users ADD COLUMN IF NOT EXISTS whatsapp TEXT;";
+          if (confirm(`DATABASE SCHEMA MISMATCH: The 'whatsapp' column is missing from your SQL table.\n\nWould you like to copy the corrective SQL command to your clipboard?`)) {
+            navigator.clipboard.writeText(sqlFix);
+            alert("SQL Copied! Run it in your Supabase/Postgres SQL editor to fix this error permanently.");
+          }
+        } else {
+          alert(`Registry Error: ${res.message}`);
+        }
+      }
+    } catch (err) {
+      alert("Infrastructure Error: Failed to communicate with identity vault.");
+    } finally {
+      setIsCommitting(false);
     }
   };
 
-  // Resolve preview image
-  const avatarPreview = editForm.nfcUrl?.startsWith('data:image') 
-    ? editForm.nfcUrl 
-    : `https://picsum.photos/seed/${user.id}/300/300`;
+  const handleDeleteIdentity = async () => {
+    if (!canDelete) return;
+    if (window.confirm(`PURGE CONFIRMATION: Permanently decommissioning identity artifact "${user.name}"? This action is immutable and will dissolve all temporal bindings in the ledger.`)) {
+      setIsCommitting(true);
+      try {
+        const res = await dataService.deleteRecord('users', user.id);
+        if (res.status === 'success') {
+          onDeleteUser?.(user.id);
+          onBack(); // Return to the list context
+        } else {
+          alert(`Handshake Failure: ${res.message}`);
+        }
+      } catch (err) {
+        alert("Infrastructure Fault during decommissioning.");
+      } finally {
+        setIsCommitting(false);
+      }
+    }
+  };
+
+  const submitMigrationRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!migrationForm.targetCluster || !migrationForm.reason.trim()) {
+      alert("Validation Error: Destination node and justification artifact are mandatory.");
+      return;
+    }
+    setIsCommitting(true);
+    
+    const requestArtifact = {
+      id: `REQ-${Date.now()}`,
+      user_id: user.id,
+      user_name: user.name,
+      current_cluster: user.cluster || 'None',
+      requested_cluster: migrationForm.targetCluster,
+      reason: migrationForm.reason,
+      status: 'Pending',
+      timestamp: new Date().toISOString()
+    };
+
+    try {
+      const res = await dataService.syncRecord('cluster_requests', requestArtifact);
+      if (res.status === 'success') {
+        alert(`MIGRATION LOGGED: Your request to join ${migrationForm.targetCluster} has been dispatched to the Resource Person's ledger for verification.`);
+        setIsRequestingMigration(false);
+        setMigrationForm({ targetCluster: '', reason: '' });
+      } else {
+        alert(`Sync Error: ${res.message}`);
+      }
+    } catch (err) {
+      alert("Infrastructure Error during migration dispatch.");
+    } finally {
+      setIsCommitting(false);
+    }
+  };
+
+  const getRankColor = (role: UserRole) => {
+    switch (role) {
+      case UserRole.SUPER_ADMIN: return 'bg-slate-900 text-white';
+      case UserRole.ADMIN: return 'bg-blue-600 text-white';
+      case UserRole.TEACHER: return 'bg-indigo-50 text-indigo-600';
+      case UserRole.STUDENT: return 'bg-emerald-50 text-emerald-600';
+      default: return 'bg-slate-500 text-white';
+    }
+  };
+
+  const expiryArtifact = useMemo(() => {
+    const expStr = user.experience;
+    if (!expStr || !expStr.includes('|')) return { date: 'No Artifact', status: 'none' };
+    
+    try {
+      const parts = expStr.split('|');
+      const expPart = parts.find(p => p.toLowerCase().includes('exp:'));
+      if (!expPart) return { date: 'Not Bound', status: 'none' };
+      
+      const dateVal = expPart.split(':')[1]?.trim() || '';
+      if (!dateVal) return { date: 'Invalid', status: 'none' };
+
+      const expiryDate = new Date(dateVal);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      const thirtyDays = new Date();
+      thirtyDays.setDate(today.getDate() + 30);
+
+      if (expiryDate < today) return { date: dateVal, status: 'expired' };
+      if (expiryDate <= thirtyDays) return { date: dateVal, status: 'upcoming' };
+      return { date: dateVal, status: 'valid' };
+    } catch (e) {
+      return { date: 'Format Err', status: 'none' };
+    }
+  }, [user.experience]);
 
   return (
-    <div className="space-y-6 md:space-y-8 pb-20 animate-in fade-in slide-in-from-right-5 duration-500 max-w-6xl mx-auto px-4 md:px-0">
-      {/* Hidden File Input */}
-      <input 
-        type="file" 
-        ref={fileInputRef} 
-        onChange={handleFileChange} 
-        className="hidden" 
-        accept="image/*" 
-      />
-
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <button 
-          onClick={onBack}
-          className="group flex items-center gap-3 text-slate-400 hover:text-slate-900 transition-colors w-fit"
-        >
-          <div className="w-10 h-10 rounded-xl bg-white border border-slate-200 flex items-center justify-center group-hover:border-blue-500 group-hover:text-blue-600 transition-all shadow-sm text-sm">
-            ←
-          </div>
-          <span className="text-[10px] font-black uppercase tracking-[0.2em]">Registry Return</span>
-        </button>
-        
-        {isManagement && (
-          <div className="flex flex-col sm:flex-row gap-3">
-            {!isEditing ? (
-              <div className="flex gap-2">
-                <button 
-                  onClick={() => onViewOperationalDetails?.(user.id, user.role)}
-                  className="px-6 py-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-xl hover:bg-slate-800 transition-all active:scale-95 flex items-center gap-2"
-                >
-                  🔭 Operational Hub
-                </button>
-                
-                {canEdit && (
-                  <>
-                    <button 
-                      onClick={() => setIsEditing(true)}
-                      className="px-6 py-3 bg-blue-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-xl shadow-blue-500/20 hover:bg-blue-700 transition-all active:scale-95 flex items-center gap-2"
-                    >
-                      ✏️ Edit Identity
-                    </button>
-                    {isAdmin && (
-                      <button 
-                        onClick={handleDeleteIdentity}
-                        className="w-11 h-11 bg-rose-50 text-rose-600 border border-rose-100 rounded-xl hover:bg-rose-600 hover:text-white transition-all shadow-sm active:scale-95 flex items-center justify-center"
-                        title="Delete User Identity"
-                      >
-                        🗑️
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
-            ) : (
-              <div className="flex gap-3">
-                <button 
-                  onClick={handleCancel}
-                  className="px-6 py-3 bg-white border border-slate-200 rounded-xl font-black text-[10px] uppercase tracking-widest text-slate-600 hover:bg-slate-50 transition-all"
-                >
-                  Discard
-                </button>
-                <button 
-                  onClick={handleSave}
-                  className="px-6 py-3 bg-emerald-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-xl shadow-emerald-500/20 hover:bg-emerald-700 transition-all active:scale-95"
-                >
-                  💾 Save & Sync
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+    <div className="max-w-3xl mx-auto space-y-6 md:space-y-10 animate-in slide-in-from-right-4 duration-500 pb-24 px-2 sm:px-0">
+      {/* HEADER BAR */}
+      <div className="flex items-center justify-between">
+        <button onClick={onBack} className="w-11 h-11 bg-white border border-slate-200 rounded-xl flex items-center justify-center text-slate-400 hover:text-blue-600 active:scale-90 transition-all shadow-sm">←</button>
+        <div className="flex gap-2">
+           {isEditing ? (
+             <>
+               <button disabled={isCommitting} onClick={() => setIsEditing(false)} className="px-5 py-2.5 bg-slate-100 text-slate-600 rounded-xl font-black text-[9px] uppercase tracking-widest disabled:opacity-50">Cancel</button>
+               {canDelete && (
+                 <button 
+                   onClick={handleDeleteIdentity}
+                   disabled={isCommitting}
+                   className="px-5 py-2.5 bg-rose-50 text-rose-600 border border-rose-100 rounded-xl font-black text-[9px] uppercase tracking-widest hover:bg-rose-600 hover:text-white transition-all disabled:opacity-50 flex items-center gap-2"
+                 >
+                   <span>🗑️</span> Decommission
+                 </button>
+               )}
+               <button 
+                 onClick={handleSave} 
+                 disabled={isCommitting}
+                 className="px-5 py-2.5 bg-blue-600 text-white rounded-xl font-black text-[9px] uppercase tracking-widest shadow-lg shadow-blue-500/20 active:scale-95 flex items-center gap-2 disabled:opacity-50"
+               >
+                 {isCommitting ? (
+                   <>
+                     <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                     Syncing...
+                   </>
+                 ) : 'Commit Artifact'}
+               </button>
+             </>
+           ) : (
+             <>
+               {currentUserRole === UserRole.TEACHER && user.id === currentUserId && (
+                 <button 
+                   onClick={() => setIsRequestingMigration(true)} 
+                   className="px-6 py-2.5 bg-amber-500 text-white rounded-xl font-black text-[9px] uppercase tracking-widest shadow-lg shadow-amber-500/20 active:scale-95 flex items-center gap-2"
+                 >
+                   <span>📂</span> Cluster Request
+                 </button>
+               )}
+               {canViewOversight && (
+                 <button 
+                   onClick={() => onOversight!(user.id, user.role)} 
+                   className="hidden sm:flex px-6 py-2.5 bg-blue-600 text-white rounded-xl font-black text-[9px] uppercase tracking-widest shadow-lg shadow-blue-500/20 active:scale-95 items-center gap-2"
+                 >
+                   <span>📊</span> Active Oversite
+                 </button>
+               )}
+               {canEditTarget && (
+                 <button onClick={() => setIsEditing(true)} className="px-6 py-2.5 bg-slate-900 text-white rounded-xl font-black text-[9px] uppercase tracking-widest shadow-lg active:scale-95">Edit Identity</button>
+               )}
+             </>
+           )}
+        </div>
       </div>
 
-      <div className="bg-white rounded-[2.5rem] md:rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden relative">
-        <div className="absolute top-0 left-0 w-full h-16 md:h-20 bg-slate-900"></div>
-        <div className="relative z-10 p-6 md:p-10 pt-16 md:pt-24 flex flex-col md:flex-row items-center md:items-start gap-6 md:gap-12">
-           <div className="w-32 h-32 md:w-44 md:h-44 rounded-[2.5rem] md:rounded-[3rem] border-4 md:border-[8px] border-white shadow-2xl overflow-hidden bg-slate-100 group relative shrink-0 -mt-10 md:-mt-16">
-              <img src={avatarPreview} alt={user.name} className="w-full h-full object-cover" />
-              {isEditing && (
-                <button 
-                  onClick={triggerUpload}
-                  className="absolute inset-0 bg-slate-900/60 flex flex-col items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity border-none"
-                >
-                   <span className="text-xl mb-1">📤</span>
-                   <span className="text-white text-[8px] font-black uppercase tracking-widest text-center px-4">Upload New</span>
-                </button>
-              )}
-           </div>
-           
-           <div className="flex-1 text-center md:text-left min-w-0">
-              <div className="flex flex-col md:flex-row md:items-center flex-wrap gap-3 md:gap-6 mb-5">
+      {/* IDENTITY HERO */}
+      <div className="bg-white rounded-[2.5rem] md:rounded-[4rem] p-8 md:p-14 border border-slate-100 shadow-sm relative overflow-hidden">
+         <div className="absolute top-0 right-0 p-10 opacity-[0.02] text-9xl font-black -rotate-12 pointer-events-none uppercase">{user.role.split('_')[0]}</div>
+         
+         <div className="flex flex-col md:flex-row items-center gap-8 md:gap-12 relative z-10">
+            <div className="w-32 h-32 md:w-48 md:h-48 rounded-[2.5rem] md:rounded-[3.5rem] bg-slate-50 border-[6px] border-white shadow-2xl overflow-hidden shrink-0">
+               <img src={`https://picsum.photos/seed/${user.id}/400/400`} className="w-full h-full object-cover" alt="profile" />
+            </div>
+            
+            <div className="text-center md:text-left flex-1 min-w-0">
+               <div className="inline-flex items-center gap-2 mb-4">
+                  <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest shadow-sm ${getRankColor(user.role)}`}>
+                    {user.role.replace('_', ' ')}
+                  </span>
+                  <span className="text-[9px] font-black text-slate-300 uppercase tracking-widest">Verified Artifact</span>
+               </div>
+               <h2 className="text-xl md:text-3xl font-black text-slate-900 tracking-tighter leading-none mb-4 truncate uppercase">
                  {isEditing ? (
-                   <input 
-                    type="text" 
-                    value={editForm.name} 
-                    onChange={e => setEditForm({...editForm, name: e.target.value})}
-                    className="text-2xl md:text-3xl font-black text-slate-900 tracking-tight bg-slate-50 border border-slate-200 rounded-2xl px-5 py-2 w-full md:w-auto outline-none focus:ring-4 focus:ring-blue-500/10"
-                   />
-                 ) : (
-                   <h2 className="text-3xl md:text-4xl font-black text-slate-900 tracking-tight leading-none break-words">{user.name}</h2>
-                 )}
-                 <div className="flex items-center justify-center md:justify-start gap-3 shrink-0">
-                    <span className="px-4 py-1.5 bg-blue-600 text-white text-[9px] md:text-[10px] font-black uppercase tracking-widest rounded-xl shadow-xl shadow-blue-500/20 whitespace-nowrap">
-                        {user.role.replace('_', ' ')}
-                    </span>
-                    <div className="flex items-center gap-2 px-3 py-1 bg-slate-50 border border-slate-100 rounded-xl shrink-0">
-                       <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-                       <span className="text-[8px] md:text-[9px] font-black text-slate-500 uppercase tracking-widest">Registry Verified</span>
-                    </div>
+                    <input 
+                      className="bg-slate-50 border-b-2 border-blue-500 w-full outline-none focus:bg-white px-2 py-1" 
+                      value={form.name} 
+                      onChange={e => setForm({...form, name: e.target.value})} 
+                    />
+                 ) : user.name}
+               </h2>
+               <div className="flex flex-wrap justify-center md:justify-start gap-3 mt-6">
+                  <StatPill label="Global ID" value={user.id} />
+                  <StatPill label="Avg. Yield" value={user.yield || '94.2%'} />
+                  <StatPill label="Status" value={user.status} color="text-emerald-600" />
+               </div>
+               
+               {canViewOversight && (
+                 <div className="mt-8 flex justify-center md:justify-start">
+                    <button 
+                      onClick={() => onOversight!(user.id, user.role)} 
+                      className="sm:hidden w-full py-4 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-xl flex items-center justify-center gap-3 active:scale-95"
+                    >
+                      <span>📊</span> Begin Active Oversite
+                    </button>
                  </div>
-              </div>
-              <div className="flex flex-wrap items-center justify-center md:justify-start gap-x-4 gap-y-2 text-slate-400 font-bold text-[11px] uppercase tracking-widest">
-                 <div className="flex items-center gap-2">
-                    <span className="text-blue-600 font-black">ID:</span> 
-                    <span className="text-slate-900 font-black">{user.id}</span>
-                 </div>
-                 <span className="hidden md:block w-1.5 h-1.5 bg-slate-200 rounded-full"></span>
-                 <p className="text-slate-800 font-black">
-                    {user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN ? 'System Authority' : user.designation}
-                 </p>
-                 <span className="hidden md:block w-1.5 h-1.5 bg-slate-200 rounded-full"></span>
-                 <span className="text-slate-500 font-black break-words">{user.assignment}</span>
-              </div>
-           </div>
-           
-           <div className="flex gap-3 md:gap-5 mt-2 md:mt-2 shrink-0">
-              <QuickStat label="Yield" value={user.yield || 'N/A'} icon="📊" />
-              <QuickStat label="Tenure" value={user.experience || 'New'} icon="🏆" />
-           </div>
-        </div>
+               )}
+            </div>
+         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-10">
-        <div className="lg:col-span-2 space-y-6 md:space-y-10">
-           <div className="bg-white p-8 md:p-12 rounded-[2.5rem] md:rounded-[3.5rem] border border-slate-200 shadow-sm">
-              <h3 className="text-lg md:text-xl font-black text-slate-900 tracking-tight mb-8 md:mb-12 flex items-center gap-4">
-                 <span className="w-10 h-10 bg-rose-50 text-rose-600 rounded-xl flex items-center justify-center text-xl shadow-inner">🔒</span> 
-                 Security & Credentials
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                 <InfoField 
-                    isEditing={isEditing} label="Login Password" icon="🔑" type="password"
-                    value={isEditing ? (editForm.password || '') : '••••••••'}
-                    onChange={v => setEditForm({...editForm, password: v})}
-                  />
-                 <InfoField 
-                    isEditing={isEditing} label="NFC Pointer URL" icon="📡"
-                    value={isEditing ? (editForm.nfcUrl || '') : (user.nfcUrl?.startsWith('data:') ? 'Image Link Sync' : (user.nfcUrl || 'Not Assigned'))}
-                    onChange={v => setEditForm({...editForm, nfcUrl: v})}
-                  />
-              </div>
-           </div>
+      {/* CORE REGISTRY DATA */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+         {/* Jurisdiction Column */}
+         <div className="bg-white rounded-[2.5rem] p-8 border border-slate-100 shadow-sm space-y-6">
+            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.25em] px-1 flex items-center gap-2">
+               <span className="w-1.5 h-1.5 bg-blue-600 rounded-full"></span>
+               Jurisdictional Nodes
+            </h3>
+            <div className="space-y-6">
+               <ProfileItem 
+                  label="Working School" 
+                  value={isEditing && (currentUserRole === UserRole.SUPER_ADMIN || currentUserRole === UserRole.ADMIN || (currentUserRole === UserRole.SCHOOL_ADMIN && user.id === currentUserId)) ? form.school : (user.school || 'NOT_ASSIGNED')} 
+                  icon="🏫" 
+                  isEditing={isEditing && (currentUserRole === UserRole.SUPER_ADMIN || currentUserRole === UserRole.ADMIN || (currentUserRole === UserRole.SCHOOL_ADMIN && user.id === currentUserId))} 
+                  onChange={(v: string) => setForm({...form, school: v})} 
+               />
+               <ProfileItem 
+                  label="Cluster Hub" 
+                  value={isEditing && (currentUserRole === UserRole.SUPER_ADMIN || currentUserRole === UserRole.ADMIN || (currentUserRole === UserRole.SCHOOL_ADMIN && user.id === currentUserId)) ? form.cluster : (user.cluster || 'NOT_LINKED')} 
+                  icon="📍" 
+                  isEditing={isEditing && (currentUserRole === UserRole.SUPER_ADMIN || currentUserRole === UserRole.ADMIN || (currentUserRole === UserRole.SCHOOL_ADMIN && user.id === currentUserId))} 
+                  onChange={(v: string) => setForm({...form, cluster: v})} 
+                  color="text-blue-600"
+               />
+               <ProfileItem 
+                  label="Physical Address" 
+                  value={isEditing ? (form.address || '') : (user.address || 'NO_ADDRESS_BOUND')} 
+                  icon="🏠" 
+                  isEditing={isEditing} 
+                  onChange={(v: string) => setForm({...form, address: v})} 
+               />
+            </div>
+         </div>
 
-           <div className="bg-white p-8 md:p-12 rounded-[2.5rem] md:rounded-[3.5rem] border border-slate-200 shadow-sm">
-              <h3 className="text-lg md:text-xl font-black text-slate-900 tracking-tight mb-8 md:mb-12 flex items-center gap-4">
-                 <span className="w-10 h-10 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center text-xl shadow-inner">🏗️</span> 
-                 Hierarchical Mapping
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 md:gap-8">
-                 <div className="md:col-span-2 xl:col-span-1">
-                  <InfoField 
-                    isEditing={isEditing} label="Primary Assignment" icon="🏫" 
-                    value={isEditing ? editForm.assignment : user.assignment}
-                    options={user.role === UserRole.TEACHER || user.role === UserRole.STUDENT ? schoolOptions : clusterOptions}
-                    onChange={v => setEditForm({...editForm, assignment: v})}
-                  />
-                 </div>
-                 <InfoField isEditing={false} label="Pointer Status" icon="📍" value={user.status} />
-                 <InfoField isEditing={false} label="Account Stability" icon="🔍" variant="highlight" value={user.status === 'Verified' ? 'Optimal' : 'Audit Req'} />
-              </div>
-           </div>
+         {/* Connectivity Column */}
+         <div className="bg-white rounded-[2.5rem] p-8 border border-slate-100 shadow-sm space-y-6">
+            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.25em] px-1 flex items-center gap-2">
+               <span className="w-1.5 h-1.5 bg-indigo-600 rounded-full"></span>
+               Connectivity Nodes
+            </h3>
+            <div className="space-y-6">
+               <ProfileItem 
+                  label="Institutional Email" 
+                  value={isEditing ? form.email : user.email} 
+                  icon="📧" 
+                  isEditing={isEditing} 
+                  onChange={(v: string) => setForm({...form, email: v})} 
+                  lowercase
+               />
+               <ProfileItem 
+                  label="Academic Designation" 
+                  value={isEditing ? (form.designation || '') : (user.designation || 'General Personnel')} 
+                  icon="🏷️" 
+                  isEditing={isEditing} 
+                  onChange={(v: string) => setForm({...form, designation: v})} 
+               />
+               
+               {/* WHATSAPP ACTION HUB */}
+               <div className="space-y-2.5">
+                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest px-1 leading-none">WhatsApp Connectivity</label>
+                  {isEditing ? (
+                    <div className="flex">
+                       <span className="flex items-center justify-center bg-slate-100 border-2 border-r-0 border-slate-100 rounded-l-xl px-3 text-[10px] font-black text-slate-400 tracking-tighter shrink-0">+91</span>
+                       <input 
+                         className="flex-1 bg-slate-50 border-2 border-slate-100 rounded-r-xl px-4 py-3 text-xs font-black outline-none focus:border-emerald-400 shadow-inner" 
+                         value={form.whatsapp} 
+                         onChange={e => setForm({...form, whatsapp: e.target.value.replace(/\D/g, '').slice(0, 10)})} 
+                         placeholder="10-digit number"
+                       />
+                    </div>
+                  ) : user.whatsapp ? (
+                    <a 
+                      href={`https://wa.me/91${user.whatsapp.replace(/\D/g, '')}`} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-between w-full p-5 bg-emerald-600 border-2 border-emerald-500 rounded-[1.5rem] shadow-xl shadow-emerald-500/10 group transition-all active:scale-95"
+                    >
+                       <div className="flex items-center gap-4">
+                          <span className="text-2xl group-hover:scale-110 transition-transform">💬</span>
+                          <div className="min-w-0">
+                             <p className="text-xs font-black text-white uppercase leading-none">Open WhatsApp Chat</p>
+                             <p className="text-[8px] font-black text-emerald-100 uppercase tracking-widest mt-1">+91 {user.whatsapp}</p>
+                          </div>
+                       </div>
+                       <span className="text-white opacity-40 group-hover:opacity-100 text-xs font-black">START →</span>
+                    </a>
+                  ) : (
+                    <div className="p-4 bg-slate-50 border-2 border-dashed border-slate-200 rounded-[1.5rem] text-center">
+                       <p className="text-[9px] font-black text-slate-300 uppercase tracking-widest">No communication node bound</p>
+                    </div>
+                  )}
+               </div>
+            </div>
+         </div>
+      </div>
 
-           <div className="bg-white p-8 md:p-12 rounded-[2.5rem] md:rounded-[3.5rem] shadow-sm border border-slate-200">
-              <h3 className="text-lg md:text-xl font-black text-slate-900 tracking-tight mb-8 md:mb-12 flex items-center gap-4">
-                 <span className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center text-xl shadow-inner">👤</span>
-                 Institutional Identity
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-y-8 md:gap-y-10 gap-x-10 md:gap-x-14">
-                 <InfoField isEditing={isEditing} label="Date of Birth" type="date" value={isEditing ? (editForm.dob || '') : (user.dob || 'Unset')} onChange={v => setEditForm({...editForm, dob: v})} />
-                 <div className="grid grid-cols-2 gap-5 md:gap-6">
-                    <InfoField isEditing={isEditing} label="Blood Group" variant="medical" value={isEditing ? (editForm.bloodGroup || '') : (user.bloodGroup || 'O+')} onChange={v => setEditForm({...editForm, bloodGroup: v})} />
-                    <InfoField isEditing={false} label="Verification Hash" value={user.id.split('-')[1] || '003'} />
-                 </div>
-                 <div className="md:col-span-2">
-                    <InfoField isEditing={isEditing} label="Verified Residence Address" value={isEditing ? (editForm.address || '') : (user.address || 'Registered Residential Node')} onChange={v => setEditForm({...editForm, address: v})} />
-                 </div>
-              </div>
-           </div>
+      {/* PRIVILEGED SECURITY PIN CONFIGURATION */}
+      {isEditing && canManagePin && (
+        <div className="bg-white rounded-[2.5rem] p-8 border border-slate-100 shadow-sm space-y-6 animate-in slide-in-from-bottom-4">
+          <h3 className="text-[10px] font-black text-rose-600 uppercase tracking-[0.25em] px-1 flex items-center gap-2">
+             <span className="w-1.5 h-1.5 bg-rose-600 rounded-full"></span>
+             Sovereign Security Node
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+             <div className="space-y-6">
+                <ProfileItem 
+                    label="Identity Security PIN (4-Digits)" 
+                    value={form.password || ''} 
+                    icon="🔐" 
+                    isEditing={true} 
+                    onChange={(v: string) => setForm({...form, password: v.replace(/\D/g, '').slice(0, 4)})} 
+                />
+                <p className="text-[10px] text-slate-400 font-medium px-1 leading-relaxed">
+                  Enter a numeric 4-digit PIN for high-fidelity terminal handshakes. This artifact is used for secure biometric and NFC resolution.
+                </p>
+             </div>
+             <div className="bg-rose-50/50 p-5 rounded-2xl border border-rose-100/50">
+                <p className="text-[9px] font-black text-rose-900 uppercase tracking-widest mb-2">Protocol Advisory</p>
+                <p className="text-[10px] text-rose-800 leading-relaxed">Updating this artifact will immediately invalidate existing temporal session tokens. Users must use the new PIN for the next terminal handshake.</p>
+             </div>
+          </div>
         </div>
+      )}
 
-        <div className="space-y-6 md:space-y-10">
-           <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-8 md:p-10 rounded-[2.5rem] md:rounded-[3.5rem] text-white shadow-2xl shadow-blue-500/30 relative overflow-hidden group">
-              <div className="absolute top-0 right-0 p-8 opacity-10 text-8xl pointer-events-none group-hover:scale-110 transition-transform translate-x-4 -translate-y-4">📊</div>
-              <h4 className="text-[10px] font-black uppercase tracking-[0.2em] mb-4 text-blue-100">Operational Hub</h4>
-              <p className="text-[11px] md:text-xs font-bold leading-relaxed mb-8 text-blue-50 opacity-90">Detailed oversight artifacts (Attendance, Timetables, Professional Credits) are isolated here for administrative integrity.</p>
-              <button 
-                onClick={() => onViewOperationalDetails?.(user.id, user.role)}
-                className="w-full py-4 bg-white text-blue-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-50 transition-all active:scale-95 shadow-xl flex items-center justify-center gap-3 relative z-10"
-              >
-                <span>📊</span> Open Operational Hub
-              </button>
-           </div>
+      {/* ADDITIONAL METADATA & HARDWARE VALIDITY */}
+      <div className="bg-slate-50 p-8 md:p-10 rounded-[3rem] border border-slate-200 shadow-inner">
+         <div className="grid grid-cols-2 lg:grid-cols-4 gap-8">
+            <MetaInfo label="Last Pulse" value={user.lastActive ? new Date(user.lastActive).toLocaleDateString() : 'N/A'} />
+            <MetaInfo label="Registry Entry" value={user.dob || 'Unknown'} />
+            <MetaInfo label="Blood Artifact" value={user.bloodGroup || 'O+'} />
+            <MetaInfo 
+              label="Hardware Expiry" 
+              value={expiryArtifact.date} 
+              color={
+                expiryArtifact.status === 'expired' ? 'text-rose-600' : 
+                expiryArtifact.status === 'upcoming' ? 'text-amber-600' : 
+                'text-emerald-600'
+              }
+              icon={expiryArtifact.status === 'expired' ? '🚫' : expiryArtifact.status === 'upcoming' ? '⚠️' : '✅'}
+            />
+         </div>
+      </div>
 
-           <div className="bg-white border border-slate-200 p-8 md:p-12 rounded-[2.5rem] md:rounded-[3.5rem] shadow-sm relative overflow-hidden">
-              <h4 className="text-slate-400 font-black text-[10px] uppercase tracking-[0.2em] mb-8 md:mb-10">Secure Contact Vault</h4>
-              <div className="space-y-8 md:space-y-10">
-                 <div className="space-y-2">
-                    <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Official Institutional Email</p>
-                    {isEditing ? (
-                      <input type="email" value={editForm.email} onChange={e => setEditForm({...editForm, email: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:ring-4 focus:ring-blue-500/10" />
-                    ) : (
-                      <p className="text-sm md:text-base font-black text-slate-900 break-all">{user.email}</p>
-                    )}
+      {/* CLUSTER MIGRATION REQUEST MODAL */}
+      {isRequestingMigration && (
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xl z-[250] flex items-end md:items-center justify-center p-0 md:p-6 animate-in fade-in duration-300">
+           <div className="bg-white w-full max-w-lg rounded-t-[2.5rem] md:rounded-[3.5rem] p-8 md:p-12 shadow-2xl animate-in slide-in-from-bottom-full md:zoom-in-95 duration-500 overflow-y-auto max-h-[95vh] custom-scrollbar">
+              <div className="flex justify-between items-start mb-8">
+                 <div>
+                    <h3 className="text-2xl font-black text-slate-900 tracking-tight leading-none uppercase">Jurisdictional Transfer</h3>
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-2">Formal Migration Request</p>
                  </div>
+                 <button onClick={() => setIsRequestingMigration(false)} className="w-10 h-10 bg-slate-50 rounded-xl flex items-center justify-center text-slate-400">✕</button>
+              </div>
+
+              <form onSubmit={submitMigrationRequest} className="space-y-8">
                  <div className="space-y-2">
-                    <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Verified Phone Artifact</p>
-                    {isEditing ? (
-                      <input type="text" value={editForm.phone || ''} onChange={e => setEditForm({...editForm, phone: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:ring-4 focus:ring-blue-500/10" />
-                    ) : (
-                      <p className="text-sm md:text-base font-black text-slate-900">{user.phone || 'Registry Unlinked'}</p>
-                    )}
-                 </div>
-                 <div className="pt-4">
-                    <div className="p-6 bg-rose-50 border border-rose-100 rounded-[2rem]">
-                       <p className="text-[9px] font-black text-rose-600 uppercase tracking-widest mb-2.5 flex items-center gap-2">
-                          <span className="w-2 h-2 bg-rose-500 rounded-full animate-pulse"></span>
-                          Emergency Response
-                       </p>
-                       <p className="text-[11px] md:text-xs font-black text-slate-900 leading-relaxed italic">
-                          {user.emergencyContact || 'Direct Campus Head Notification Protocol Active'}
-                       </p>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Destination Cluster Node</label>
+                    <div className="relative">
+                       <select 
+                        required 
+                        value={migrationForm.targetCluster} 
+                        onChange={e => setMigrationForm({...migrationForm, targetCluster: e.target.value})}
+                        className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-4 text-xs font-black uppercase appearance-none cursor-pointer outline-none focus:ring-8 focus:ring-blue-500/5 shadow-inner"
+                       >
+                          <option value="">Select Destination...</option>
+                          {availableClusters.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                       </select>
+                       <span className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none opacity-30 text-[8px]">▼</span>
                     </div>
                  </div>
-              </div>
+
+                 <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Justification for Migration <span className="text-rose-500">*</span></label>
+                    <textarea 
+                      required
+                      value={migrationForm.reason}
+                      onChange={e => setMigrationForm({...migrationForm, reason: e.target.value})}
+                      placeholder="Please provide a valid professional or personal reason for this jurisdictional change. Resource Persons must verify this justification artifact."
+                      className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-5 text-sm font-medium outline-none h-40 resize-none focus:ring-8 focus:ring-blue-500/5 shadow-inner"
+                    />
+                 </div>
+
+                 <div className="bg-amber-50 p-5 rounded-2xl border border-amber-100">
+                    <p className="text-[10px] font-black text-amber-900 uppercase tracking-widest flex items-center gap-2 mb-2">
+                       <span>⚠️</span> Policy Mandate
+                    </p>
+                    <p className="text-[10px] text-amber-800 leading-relaxed font-bold">Requests without valid professional or logistical artifacts will be immediately rejected by the regional auditor.</p>
+                 </div>
+
+                 <div className="flex gap-4">
+                    <button type="button" onClick={() => setIsRequestingMigration(false)} className="flex-1 py-5 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest">Discard</button>
+                    <button 
+                      type="submit" 
+                      disabled={isCommitting}
+                      className="flex-[2] py-5 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-[0.2em] shadow-xl active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                       {isCommitting ? 'HANDSHAKING...' : 'DISPATCH REQUEST'}
+                    </button>
+                 </div>
+              </form>
            </div>
         </div>
+      )}
+
+      {/* SYSTEM ADVISORY */}
+      <div className="bg-blue-50 p-8 rounded-[3rem] border border-blue-100">
+         <h4 className="text-[10px] font-black text-blue-900 uppercase tracking-widest mb-4 flex items-center gap-2">
+            <span>🛡️</span> Institutional Security Advisory
+         </h4>
+         <p className="text-xs text-blue-800 leading-relaxed font-medium">
+            This identity artifact is subject to periodic cryptographic validation. Hardware access through NFC terminals is strictly bound to the <strong>Hardware Expiry</strong> node displayed above. Expired credentials will be automatically blacklisted by the gate resolution server.
+         </p>
       </div>
     </div>
   );
 };
 
-const QuickStat: React.FC<{ label: string, value: string, icon: string }> = ({ label, value, icon }) => (
-  <div className="bg-white/90 backdrop-blur-md p-3 md:p-5 rounded-[1.5rem] md:rounded-[2rem] border border-slate-100 shadow-xl flex-1 md:flex-none min-w-[90px] md:min-w-[120px] text-center group hover:scale-105 transition-transform">
-    <div className="flex items-center justify-center gap-2 mb-2">
-       <span className="text-sm md:text-lg">{icon}</span>
-       <span className="text-[8px] md:text-[9px] font-black text-slate-400 uppercase tracking-widest">{label}</span>
-    </div>
-    <p className="text-lg md:text-2xl font-black text-slate-900 leading-none tracking-tight">{value}</p>
+const StatPill = ({ label, value, color = "text-slate-500" }: any) => (
+  <div className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl">
+    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">{label}</p>
+    <p className={`text-xs font-black uppercase ${color}`}>{value}</p>
   </div>
 );
 
-const InfoField: React.FC<{ 
-  label: string, value: string, icon?: string, variant?: 'normal' | 'medical' | 'highlight', isEditing?: boolean, type?: string, options?: string[], onChange?: (val: string) => void
-}> = ({ label, value, icon, variant = 'normal', isEditing, type = "text", options, onChange }) => (
-  <div className="space-y-2.5">
-    <p className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">{label}</p>
-    {isEditing ? (
-      options ? (
-        <select value={value} onChange={e => onChange?.(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs md:text-sm font-black outline-none focus:ring-4 focus:ring-blue-500/10 shadow-inner">
-          {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-        </select>
+const ProfileItem = ({ label, value, icon, isEditing, onChange, color = "text-slate-900", lowercase = false }: any) => (
+  <div className="flex items-center gap-4">
+    <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-lg shadow-inner">
+      {icon}
+    </div>
+    <div className="flex-1 min-w-0">
+      <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1 leading-none">{label}</p>
+      {isEditing ? (
+        <input 
+          className="w-full bg-slate-50 border-b border-blue-200 text-sm font-bold outline-none focus:border-blue-500 py-0.5" 
+          value={value} 
+          onChange={e => onChange(e.target.value)} 
+        />
       ) : (
-        <input type={type} value={value} onChange={e => onChange?.(e.target.value)} className={`w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs md:text-sm font-black outline-none focus:ring-4 focus:ring-blue-500/10 shadow-inner ${type === 'password' ? 'tracking-[0.5em]' : ''}`} />
-      )
-    ) : (
-      <div className={`rounded-2xl md:rounded-[1.5rem] p-4 md:p-5 text-sm md:text-base font-black border transition-all h-full flex flex-col justify-center min-h-[64px] ${
-        variant === 'medical' ? 'bg-rose-50 border-rose-100 text-rose-700' :
-        variant === 'highlight' ? 'bg-blue-600 text-white border-blue-500 shadow-xl shadow-blue-500/20' :
-        'bg-slate-50 border-slate-100 text-slate-800'
-      }`}>
-        <div className="flex items-start gap-3 md:gap-4">
-            {icon && <span className="text-xl md:text-2xl shrink-0 mt-0.5">{icon}</span>}
-            <span className={`leading-tight break-words whitespace-normal overflow-visible uppercase text-[11px] md:text-xs tracking-tight ${type === 'password' ? 'tracking-[0.5em]' : ''}`}>
-              {value}
-            </span>
-        </div>
-      </div>
-    )}
+        <p className={`text-sm font-black truncate leading-tight ${lowercase ? '' : 'uppercase'} ${color}`}>{value}</p>
+      )}
+    </div>
+  </div>
+);
+
+const MetaInfo = ({ label, value, color = "text-slate-900", icon }: any) => (
+  <div className="space-y-1 text-center md:text-left">
+    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">{label}</p>
+    <div className="flex items-center justify-center md:justify-start gap-1.5">
+       {icon && <span className="text-[10px]">{icon}</span>}
+       <p className={`text-xs font-black uppercase tracking-tight ${color}`}>{value}</p>
+    </div>
   </div>
 );
 

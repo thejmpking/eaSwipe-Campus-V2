@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { UserRole } from '../types';
 
@@ -24,6 +23,21 @@ const AuditLogs: React.FC = () => {
     { id: 'LOG-8825', timestamp: '2024-05-24 09:15:45', actorName: 'Principal Helena Smith', actorRole: UserRole.SCHOOL_ADMIN, action: 'TOKEN_ISSUE', target: 'Bob Richards (Student)', category: 'Authority', metadata: 'Hardware_ID: NFC-X0921-B' },
     { id: 'LOG-8826', timestamp: '2024-05-24 09:30:00', actorName: 'Admin Sarah Johnson', actorRole: UserRole.ADMIN, action: 'ACCESS_REVOKE', target: 'USR-092 (Suspended)', category: 'Security', metadata: 'Reason: SECURITY_PROTOCOL_BREACH' },
   ]);
+
+  const format12h = (timeStr: string) => {
+    if (!timeStr) return '--:--';
+    try {
+      const parts = timeStr.split(':');
+      const h = parts[0];
+      const m = parts[1] || '00';
+      const hours = parseInt(h);
+      const suffix = hours >= 12 ? 'PM' : 'AM';
+      const h12 = hours % 12 || 12;
+      return `${String(h12).padStart(2, '0')}:${m} ${suffix}`;
+    } catch (e) {
+      return timeStr;
+    }
+  };
 
   const categories = ['All', 'Attendance', 'Security', 'Policy', 'Authority'];
   const filteredLogs = filter === 'All' ? logs : logs.filter(l => l.category === filter);
@@ -75,7 +89,7 @@ const AuditLogs: React.FC = () => {
                     <tr key={log.id} className="hover:bg-slate-50/50 transition-colors group">
                       <td className="px-8 py-6">
                         <p className="text-[11px] font-bold text-slate-900">{log.timestamp.split(' ')[0]}</p>
-                        <p className="text-[10px] text-slate-400 mt-1">{log.timestamp.split(' ')[1]}</p>
+                        <p className="text-[10px] text-slate-400 mt-1">{format12h(log.timestamp.split(' ')[1])}</p>
                       </td>
                       <td className="px-8 py-6">
                         <div className="flex flex-col">

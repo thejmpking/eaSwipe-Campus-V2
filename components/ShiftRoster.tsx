@@ -1,13 +1,13 @@
-
 import React, { useState, useMemo, useEffect } from 'react';
 import { UserRole, Shift, ShiftAssignment } from '../types';
 import { dataService } from '../services/dataService';
 
 interface ShiftRosterProps {
   onBack: () => void;
+  onSync?: () => void;
 }
 
-const ShiftRoster: React.FC<ShiftRosterProps> = ({ onBack }) => {
+const ShiftRoster: React.FC<ShiftRosterProps> = ({ onBack, onSync }) => {
   const [users, setUsers] = useState<any[]>([]);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
@@ -39,6 +39,21 @@ const ShiftRoster: React.FC<ShiftRosterProps> = ({ onBack }) => {
 
   useEffect(() => { fetchRegistry(); }, []);
 
+  const format12h = (timeStr: string) => {
+    if (!timeStr) return '--:--';
+    try {
+      const parts = timeStr.split(':');
+      const h = parts[0];
+      const m = parts[1] || '00';
+      const hours = parseInt(h);
+      const suffix = hours >= 12 ? 'PM' : 'AM';
+      const h12 = hours % 12 || 12;
+      return `${String(h12).padStart(2, '0')}:${m} ${suffix}`;
+    } catch (e) {
+      return timeStr;
+    }
+  };
+
   const weekDates = useMemo(() => {
     const dates = [];
     const now = new Date();
@@ -63,11 +78,16 @@ const ShiftRoster: React.FC<ShiftRosterProps> = ({ onBack }) => {
     if (!activeSelection) return;
     setIsCommitting(true);
     
-    // Find existing assignment for this user on this exact date
-    const existing = assignments.find(a => a.targetId === activeSelection.empId && a.assignedDate === activeSelection.date);
+    const existing = assignments.find(a => 
+      a.targetId === activeSelection.empId && 
+      (a.assignedDate === activeSelection.date || (a.startDate && a.endDate && activeSelection.date >= a.startDate && activeSelection.date <= a.endDate))
+    );
     
     if (shiftId === null) {
-      if (existing) await dataService.deleteRecord('shift_assignments', existing.id);
+      if (existing) {
+        await dataService.deleteRecord('shift_assignments', existing.id);
+        if (onSync) onSync(); // Immediate callback for parent/bindings sync
+      }
     } else {
       const user = users.find(u => u.id === activeSelection.empId);
       const newAssign: ShiftAssignment = {
@@ -76,9 +96,24 @@ const ShiftRoster: React.FC<ShiftRosterProps> = ({ onBack }) => {
         targetId: activeSelection.empId,
         targetName: user?.name || 'Identity Node',
         targetType: 'Individual',
-        assignedDate: activeSelection.date
+        assignedDate: activeSelection.date,
+        startDate: activeSelection.date,
+        endDate: activeSelection.date
       };
-      await dataService.syncRecord('shift_assignments', newAssign);
+      const res = await dataService.syncRecord('shift_assignments', newAssign);
+      if (res.status === 'error') {
+        if (res.message?.includes("PGRST204") || res.message?.includes("end_date")) {
+          const sqlFix = "ALTER TABLE shift_assignments ADD COLUMN IF NOT EXISTS start_date DATE; ALTER TABLE shift_assignments ADD COLUMN IF NOT EXISTS end_date DATE;";
+          if (confirm(`SQL SCHEMA ERROR: Missing temporal range columns. Copy fix SQL to clipboard?`)) {
+            navigator.clipboard.writeText(sqlFix);
+            alert("SQL Fix copied! Run it in your Supabase SQL Editor.");
+          }
+        } else {
+          alert(`SQL Sync Error: ${res.message || 'Handshake failed.'}`);
+        }
+      } else {
+        if (onSync) onSync(); // Immediate callback for parent/bindings sync
+      }
     }
     
     await fetchRegistry();
@@ -90,47 +125,66 @@ const ShiftRoster: React.FC<ShiftRosterProps> = ({ onBack }) => {
     return users.filter(u => {
       const matchesSearch = u.name.toLowerCase().includes(searchQuery.toLowerCase()) || u.id.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesRole = roleFilter === 'All' || u.role === roleFilter;
-      return matchesSearch && matchesRole && u.role !== UserRole.STUDENT; // Roster primarily for faculty/staff
+      return matchesSearch && matchesRole && u.role !== UserRole.STUDENT; 
     });
   }, [users, searchQuery, roleFilter]);
 
-  if (isLoading && users.length === 0) return <div className="p-20 text-center animate-pulse">Querying Roster Nodes...</div>;
+  if (isLoading && users.length === 0) return (
+    <div className="p-20 text-center animate-pulse flex flex-col items-center justify-center space-y-4">
+      <div className="w-10 h-10 border-4 border-blue-600/20 border-t-blue-600 rounded-full animate-spin"></div>
+      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Querying Roster Nodes...</p>
+    </div>
+  );
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500 pb-24">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-3xl font-black text-slate-800 tracking-tight leading-none">Cloud Roster Feed</h2>
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mt-2">Active Week: {weekDates[0].month} {weekDates[0].date} — {weekDates[6].date}</p>
+    <div className="space-y-4 md:space-y-8 animate-in fade-in duration-500 pb-24 px-1 max-w-full overflow-hidden">
+      <div className="flex flex-col gap-4 px-2">
+        <div className="flex items-center justify-between">
+           <div className="min-w-0">
+             <h2 className="text-xl md:text-3xl font-black text-slate-800 tracking-tight leading-none uppercase">Roster Feed</h2>
+             <p className="text-[8px] md:text-[10px] font-black uppercase tracking-widest text-blue-600 mt-1">Institutional Temporal Map</p>
+           </div>
+           <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1 shadow-sm shrink-0">
+              <button onClick={() => setActiveWeek(prev => prev - 1)} className="w-9 h-9 flex items-center justify-center text-slate-400 hover:text-blue-600 active:scale-90 transition-all">‹</button>
+              <button onClick={() => setActiveWeek(0)} className="px-3 text-[8px] font-black uppercase tracking-widest text-slate-500">Today</button>
+              <button onClick={() => setActiveWeek(prev => prev + 1)} className="w-9 h-9 flex items-center justify-center text-slate-400 hover:text-blue-600 active:scale-90 transition-all">›</button>
+           </div>
         </div>
-        <div className="flex gap-2 bg-white border border-slate-200 rounded-2xl p-1 shadow-sm">
-           <button onClick={() => setActiveWeek(prev => prev - 1)} className="w-10 h-10 flex items-center justify-center text-slate-400 hover:text-blue-600 transition-all">‹</button>
-           <button onClick={() => setActiveWeek(0)} className="px-4 text-[9px] font-black uppercase tracking-widest text-slate-400">Current</button>
-           <button onClick={() => setActiveWeek(prev => prev + 1)} className="w-10 h-10 flex items-center justify-center text-slate-400 hover:text-blue-600 transition-all">›</button>
+
+        <div className="flex gap-2">
+           <div className="relative flex-1">
+              <input 
+                type="text" 
+                placeholder="Search name..." 
+                value={searchQuery} 
+                onChange={e => setSearchQuery(e.target.value)} 
+                className="w-full pl-9 pr-3 py-3 bg-white border border-slate-200 rounded-xl text-xs font-bold outline-none shadow-sm focus:border-blue-400" 
+              />
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm opacity-20">🔍</span>
+           </div>
+           <select 
+             value={roleFilter} 
+             onChange={e => setRoleFilter(e.target.value)} 
+             className="w-24 px-2 py-3 bg-white border border-slate-200 rounded-xl text-[8px] font-black uppercase appearance-none cursor-pointer text-center"
+           >
+              <option value="All">Roles</option>
+              {Object.values(UserRole).map(r => <option key={r} value={r}>{r.split('_')[0]}</option>)}
+           </select>
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-[2.5rem] p-4 flex flex-col md:flex-row gap-4 shadow-sm">
-         <div className="relative flex-1">
-            <input type="text" placeholder="Filter identities..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="w-full pl-12 pr-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-xs font-bold outline-none shadow-inner" />
-            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-lg opacity-20">🔍</span>
-         </div>
-         <select value={roleFilter} onChange={e => setRoleFilter(e.target.value)} className="px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-[10px] font-black uppercase appearance-none cursor-pointer">
-            <option value="All">All Tiers</option>
-            {Object.values(UserRole).map(r => <option key={r} value={r}>{r.replace('_', ' ')}</option>)}
-         </select>
-      </div>
-
-      <div className="bg-white border border-slate-200 rounded-[3rem] shadow-sm overflow-hidden relative">
-         <div className="overflow-x-auto custom-scrollbar">
-            <table className="w-full text-left min-w-[1000px]">
-               <thead className="bg-slate-50 border-b border-slate-100">
+      <div className="bg-white border border-slate-200 rounded-[1.5rem] md:rounded-[3rem] shadow-sm overflow-hidden relative mx-1">
+         <div className="overflow-x-auto custom-scrollbar scroll-smooth" style={{ WebkitOverflowScrolling: 'touch' }}>
+            <table className="w-full text-left border-collapse table-fixed">
+               <thead className="bg-slate-50 border-b border-slate-100 sticky top-0 z-40">
                   <tr>
-                     <th className="sticky left-0 z-30 bg-slate-50 px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest border-r min-w-[280px]">Node Identity</th>
+                     <th className="sticky left-0 z-30 bg-slate-50 px-3 md:px-8 py-4 md:py-6 text-[8px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest border-r w-[150px] md:w-[300px] shadow-[4px_0_12px_rgba(0,0,0,0.05)]">
+                        Identity
+                     </th>
                      {weekDates.map((d, i) => (
-                       <th key={i} className="px-1 py-5 text-center border-r border-slate-200/40">
-                          <p className={`text-xl font-black ${d.isToday ? 'text-blue-600' : 'text-slate-800'}`}>{d.date}</p>
-                          <p className={`text-[8px] font-black ${d.isToday ? 'text-blue-600' : 'text-slate-400'} uppercase`}>{d.dayName.substring(0, 3)}</p>
+                       <th key={i} className={`px-1 py-3 md:py-5 text-center border-r border-slate-200/40 w-[calc((100vw-158px)/3)] md:w-[120px] ${d.isToday ? 'bg-blue-600/5' : ''}`}>
+                          <p className={`text-sm md:text-xl font-black leading-none ${d.isToday ? 'text-blue-600' : 'text-slate-800'}`}>{d.date}</p>
+                          <p className={`text-[7px] md:text-[8px] font-black ${d.isToday ? 'text-blue-600' : 'text-slate-400'} uppercase mt-1`}>{d.dayName.substring(0, 3)}</p>
                        </th>
                      ))}
                   </tr>
@@ -138,66 +192,91 @@ const ShiftRoster: React.FC<ShiftRosterProps> = ({ onBack }) => {
                <tbody className="divide-y divide-slate-100">
                   {filteredUsers.map(emp => (
                     <tr key={emp.id} className="hover:bg-slate-50/50 group transition-colors">
-                       <td className="sticky left-0 z-20 bg-white group-hover:bg-slate-50 px-8 py-4 border-r border-slate-100 shadow-sm">
-                          <div className="flex items-center gap-4">
-                             <div className="w-11 h-11 rounded-2xl bg-slate-100 border-2 border-white shadow-md overflow-hidden shrink-0">
-                                <img src={emp.nfcUrl?.startsWith('data:') ? emp.nfcUrl : `https://picsum.photos/seed/${emp.id}/64/64`} className="w-full h-full object-cover" />
+                       <td className="sticky left-0 z-20 bg-white group-hover:bg-slate-50 px-3 md:px-8 py-3 md:py-5 border-r border-slate-100 shadow-[4px_0_12px_rgba(0,0,0,0.05)]">
+                          <div className="flex items-center gap-3 min-w-0">
+                             <div className="w-9 h-9 md:w-11 md:h-11 rounded-lg md:rounded-2xl bg-slate-100 border border-slate-200 shadow-sm overflow-hidden shrink-0">
+                                <img src={emp.nfcUrl?.startsWith('data:') ? emp.nfcUrl : `https://picsum.photos/seed/${emp.id}/64/64`} className="w-full h-full object-cover" alt="p" />
                              </div>
-                             <div className="min-w-0">
-                                <p className="text-xs font-black text-slate-900 uppercase truncate leading-none mb-1.5">{emp.name}</p>
-                                <p className="text-[8px] text-slate-400 font-bold uppercase tracking-widest truncate">{emp.assignment}</p>
+                             <div className="min-w-0 flex-1 overflow-hidden">
+                                <p className="text-[10px] md:text-xs font-black text-slate-900 uppercase leading-snug mb-0.5 break-words whitespace-normal">{emp.name}</p>
+                                <div className="flex items-center gap-1.5">
+                                   <div className="w-1 h-1 rounded-full bg-emerald-500"></div>
+                                   <p className="text-[7px] md:text-[8px] text-slate-400 font-bold uppercase tracking-tighter truncate">#{emp.id.split('-').pop()}</p>
+                                </div>
                              </div>
                           </div>
                        </td>
                        {weekDates.map((d, i) => {
-                         const assign = assignments.find(a => a.targetId === emp.id && a.assignedDate === d.fullDate);
+                         const assign = assignments.find(a => 
+                           a.targetId === emp.id && 
+                           (d.fullDate === a.assignedDate || (a.startDate && a.endDate && d.fullDate >= a.startDate && d.fullDate <= a.endDate))
+                         );
                          const shift = shifts.find(s => s.id === assign?.shiftId);
                          return (
-                           <td key={i} className="px-2 py-3 border-r border-slate-200/40">
+                           <td key={i} className={`px-1.5 py-2 border-r border-slate-200/40 ${d.isToday ? 'bg-blue-600/5' : ''}`}>
                               <button 
                                 onClick={() => setActiveSelection({ empId: emp.id, date: d.fullDate })}
-                                className={`w-full h-12 rounded-xl flex items-center justify-center font-black text-[9px] shadow-sm active:scale-95 transition-all ${
-                                  shift ? 'bg-blue-600 text-white shadow-blue-500/20' : 'bg-slate-50 text-slate-200 border-2 border-dashed border-slate-100 hover:border-blue-300 hover:text-blue-300'
+                                className={`w-full h-10 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center font-black text-[7px] md:text-[9px] transition-all active:scale-90 border-2 ${
+                                  shift 
+                                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20 border-blue-500' 
+                                  : 'bg-slate-50 text-slate-200 border-dashed border-slate-200 hover:border-blue-200 hover:text-blue-300'
                                 }`}
                               >
-                                {shift ? shift.label.split(' ')[0].toUpperCase() : '+'}
+                                {shift ? shift.label.substring(0, 3).toUpperCase() : '+'}
                               </button>
                            </td>
                          );
                        })}
                     </tr>
                   ))}
+                  {filteredUsers.length === 0 && (
+                    <tr><td colSpan={8} className="py-20 text-center text-[10px] font-black text-slate-300 uppercase tracking-widest">No node signatures found</td></tr>
+                  )}
                </tbody>
             </table>
          </div>
       </div>
 
+      <div className="md:hidden flex justify-center pb-2">
+         <div className="bg-white px-5 py-2 rounded-full border border-slate-200 shadow-sm flex items-center gap-3">
+            <span className="text-blue-600 animate-bounce">↔</span>
+            <span className="text-[8px] font-black text-slate-500 uppercase tracking-[0.2em]">Swipe to view full horizon</span>
+         </div>
+      </div>
+
       {activeSelection && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[100] flex items-center justify-center p-6">
-           <div className="bg-white max-w-md w-full rounded-[2.5rem] p-10 shadow-2xl animate-in zoom-in-95 duration-300">
-              <div className="flex justify-between items-start mb-8">
-                 <h3 className="text-2xl font-black text-slate-900 tracking-tight leading-none">Atomic Shift Override</h3>
-                 <button onClick={() => setActiveSelection(null)} className="text-slate-400 hover:text-slate-900 transition-colors">✕</button>
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xl z-[200] flex items-end md:items-center justify-center p-0 md:p-6 animate-in fade-in duration-300">
+           <div className="bg-white w-full max-w-md rounded-t-[2.5rem] md:rounded-[2.5rem] p-6 md:p-10 shadow-2xl animate-in slide-in-from-bottom-full md:zoom-in-95 duration-500 overflow-y-auto max-h-[85vh]">
+              <div className="flex justify-between items-start mb-8 sticky top-0 bg-white py-1">
+                 <div>
+                    <h3 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight leading-none uppercase">Assign Shift</h3>
+                    <p className="text-[8px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest mt-2">{new Date(activeSelection.date).toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+                 </div>
+                 <button onClick={() => setActiveSelection(null)} className="w-10 h-10 bg-slate-50 rounded-xl flex items-center justify-center text-slate-400 hover:text-slate-900 active:scale-90 transition-all shadow-sm">✕</button>
               </div>
-              <div className="space-y-3">
+              <div className="space-y-2.5 md:space-y-4 pb-6">
                  {shifts.map(s => (
-                   <button key={s.id} onClick={() => handleAssignShift(s.id)} className="w-full flex items-center justify-between p-5 bg-white border border-slate-100 rounded-2xl hover:bg-blue-600 hover:border-blue-500 hover:shadow-xl group transition-all">
-                      <div className="text-left">
-                         <p className="text-sm font-black text-slate-800 group-hover:text-white">{s.label}</p>
-                         <p className="text-[10px] font-bold text-slate-400 group-hover:text-blue-100 uppercase mt-1">{s.startTime} — {s.endTime}</p>
+                   <button key={s.id} onClick={() => handleAssignShift(s.id)} className="w-full flex items-center justify-between p-5 bg-white border border-slate-100 rounded-2xl md:rounded-3xl hover:bg-blue-600 hover:border-blue-500 hover:shadow-xl group transition-all text-left">
+                      <div className="min-w-0 flex-1">
+                         <p className="text-xs md:text-sm font-black text-slate-800 group-hover:text-white uppercase truncate">{s.label}</p>
+                         <p className="text-[8px] md:text-[9px] font-bold text-slate-400 group-hover:text-blue-100 uppercase mt-1">{format12h(s.startTime)} — {format12h(s.endTime)}</p>
                       </div>
-                      <span className="opacity-0 group-hover:opacity-100 transition-opacity">→</span>
+                      <span className="opacity-0 group-hover:opacity-100 transition-all text-white text-lg font-black ml-4 transform translate-x-[-10px] group-hover:translate-x-0">→</span>
                    </button>
                  ))}
-                 <div className="pt-4 mt-4 border-t border-slate-100">
-                    <button onClick={() => handleAssignShift(null)} className="w-full p-4 bg-rose-50 text-rose-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-rose-600 hover:text-white transition-all">🗑️ Clear Assignment</button>
+                 <div className="pt-6 mt-6 border-t border-slate-100">
+                    <button onClick={() => handleAssignShift(null)} className="w-full py-5 bg-rose-50 text-rose-600 rounded-2xl md:rounded-3xl font-black text-[9px] md:text-xs uppercase tracking-widest hover:bg-rose-600 hover:text-white transition-all active:scale-95 shadow-sm">🗑️ Clear Current Assignment</button>
                  </div>
               </div>
            </div>
         </div>
       )}
 
-      <div className="flex justify-center"><button onClick={onBack} className="text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-slate-900 transition-colors flex items-center gap-2">← Return to Management</button></div>
+      <div className="flex justify-center px-4 pt-4">
+        <button onClick={onBack} className="w-full md:w-auto px-10 py-5 bg-slate-900 text-white rounded-[1.5rem] md:rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-600 transition-all active:scale-95 shadow-xl">
+          ← Return to Shift Registry
+        </button>
+      </div>
     </div>
   );
 };
